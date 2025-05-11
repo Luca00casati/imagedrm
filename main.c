@@ -48,7 +48,7 @@ void drawrect(u_int32_t *data, int stripe, int x1, int y1, int x2, int y2, u_int
 }
 
 void drawrectimg(u_int32_t *data, int stripe, int x1, int y1, int x2, int y2,
-                 unsigned char *data_image)
+                 unsigned char *data_image, int image_x)
 {
     int stride = stripe / 4; // framebuffer stride in pixels
     for (int y = y1; y < y2; y++)
@@ -58,7 +58,7 @@ void drawrectimg(u_int32_t *data, int stripe, int x1, int y1, int x2, int y2,
             int fb_index = y * stride + x;
             int img_x = x - x1;
             int img_y = y - y1;
-            int img_index = (img_y * x2 + img_x) * 4;
+            int img_index = (img_y * image_x + img_x) * 4;
 
             unsigned char r = data_image[img_index + 0];
             unsigned char g = data_image[img_index + 1];
@@ -80,9 +80,6 @@ drmModeConnectorPtr getFistConnectedConnector(int fdcard, drmModeResPtr res)
 
         if (connector->connection == DRM_MODE_CONNECTED)
         {
-            // printf("connector: %d\ncount connector: %d\n", res->connectors[i], res->count_connectors);
-            // printf("crtc: %d\ncount crtc: %d\n", res->crtcs[i], res->crtcs[i]);
-            // printf("connector type: %d\nconnector type id: %d\n", connector->connector_type, connector->connector_type_id);
             return connector;
         }
     }
@@ -153,10 +150,6 @@ int main()
         goto go_exit;
     }
 
-    /*
-        printf("horizontal parameters\ndisplay: %d\nsync_start: %d\nsync_end: %d\ntotal: %d\n", resolution->hdisplay, resolution->hsync_start, resolution->hsync_end, resolution->htotal);
-        printf("vertical parameters\ndisplay: %d\nsync_start: %d\nsync_end: %d\ntotal: %d\n", resolution->vdisplay, resolution->vsync_start, resolution->vsync_end, resolution->vtotal);
-    */
     u_int32_t handle_db, pitch_db;
     u_int64_t size_db;
     if (drmModeCreateDumbBuffer(fdcard, resolution->hdisplay, resolution->vdisplay, 32, 0, &handle_db, &pitch_db, &size_db))
@@ -204,6 +197,9 @@ int main()
                             data_image_scale, image_x_scale, image_y_scale, 0,
                             4);
 
+    int border_offset_x = (resolution->hdisplay - image_x_scale) / 2;
+    int border_offset_y = (resolution->vdisplay - image_y_scale) / 2;
+
     uint32_t fb_id;
     if (drmModeAddFB(fdcard, resolution->hdisplay, resolution->vdisplay, 24, 32, pitch_db, handle_db, &fb_id))
     {
@@ -247,7 +243,7 @@ int main()
 
     // drawrect(data_db, pitch_db, 0, 0, 100, 100, RGB(0, 0, 0));
 
-    drawrectimg(data_db, pitch_db, 0, 0, image_x_scale, image_y_scale, data_image_scale);
+    drawrectimg(data_db, pitch_db, border_offset_x, border_offset_y, image_x_scale + border_offset_x, image_y_scale + border_offset_y, data_image_scale, image_x_scale);
 
     drmModeSetCrtc(fdcard, crtc->crtc_id, fb_id, 0, 0, &connector->connector_id, 1, resolution);
 
