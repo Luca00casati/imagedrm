@@ -7,6 +7,59 @@
 #include <string.h>
 // #include <sys/ioctl.h>
 #include <sys/mman.h>
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
+u_int32_t hexrgb(const u_int32_t rgb)
+{
+    return (rgb | 0xff000000);
+}
+
+u_int32_t rgb(const u_int32_t r, const u_int32_t g, const u_int32_t b)
+{
+    u_int32_t a = 255;
+    return ((a << 24) | (r << 16) | (g << 8) | b);
+}
+
+/*
+u_int32_t argb(const u_int32_t a, const u_int32_t r, const u_int32_t g, const u_int32_t b)
+{
+    return ((a << 24) | (r << 16) | (g << 8) | b);
+}
+*/
+void drawrect(u_int32_t *data, int stripe, int x1, int y1, int x2, int y2, u_int32_t color)
+{
+    for (int y = y1; y < y2; y++)
+    {
+        for (int x = x1; x < x2; x++)
+        {
+            int pix_pos = y * (stripe / 4) + x;
+            data[pix_pos] = color;
+        }
+    }
+}
+
+void drawrectimg(u_int32_t *data, int stripe, int x1, int y1, int x2, int y2,
+                 unsigned char *data_image)
+{
+    int stride = stripe / 4; // framebuffer stride in pixels
+    for (int y = y1; y < y2; y++)
+    {
+        for (int x = x1; x < x2; x++)
+        {
+            int fb_index = y * stride + x;
+            int img_x = x - x1;
+            int img_y = y - y1;
+            int img_index = (img_y * x2 + img_x) * 4;
+
+            unsigned char r = data_image[img_index + 0];
+            unsigned char g = data_image[img_index + 1];
+            unsigned char b = data_image[img_index + 2];
+
+            data[fb_index] = rgb(r,g,b);
+        }
+    }
+}
 
 drmModeConnectorPtr getFistConnectedConnector(int fdcard, drmModeResPtr res)
 {
@@ -53,6 +106,7 @@ int main()
     drmModeCrtcPtr crtc = NULL;
     int fdcard = 0;
     int ret_value = 0;
+    unsigned char *data_image = NULL;
 
     fdcard = open(MY_DRI_CARD, O_RDWR);
     if (fdcard < 0)
@@ -101,6 +155,25 @@ int main()
         goto go_exit;
     }
 
+    u_int64_t offset_db;
+    if (drmModeMapDumbBuffer(fdcard, handle_db, &offset_db))
+    {
+        fprintf(stderr, "fail to prepare map dumbbuffer\n");
+        ret_value = MY_ERR_RET;
+        goto go_exit;
+    }
+
+    int image_x, image_y, image_chan;
+    /* force 4 channel */
+    data_image = stbi_load("img.jpg", &image_x, &image_y, &image_chan, 4);
+    image_chan = 4;
+    if (data_image == NULL)
+    {
+        fprintf(stderr, "fail to load image\n");
+        ret_value = MY_ERR_RET;
+        goto go_exit;
+    }
+
     uint32_t fb_id;
     if (drmModeAddFB(fdcard, resolution->hdisplay, resolution->vdisplay, 24, 32, pitch_db, handle_db, &fb_id))
     {
@@ -125,14 +198,6 @@ int main()
         goto go_exit;
     }
 
-    u_int64_t offset_db;
-    if (drmModeMapDumbBuffer(fdcard, handle_db, &offset_db))
-    {
-        fprintf(stderr, "fail to prepare map dumbbuffer\n");
-        ret_value = MY_ERR_RET;
-        goto go_exit;
-    }
-
     data_db = mmap(0, size_db, PROT_READ | PROT_WRITE, MAP_SHARED, fdcard, offset_db);
     if (data_db == MAP_FAILED)
     {
@@ -141,13 +206,23 @@ int main()
         goto go_exit;
     }
 
-    memset(data_db, 0xffffffff, size_db);
+    /* bg */
+    for (uint32_t i = 0; i < size_db / sizeof(*data_db); i++)
+    {
+        data_db[i] = rgb(255, 0, 0);
+    }
+
+    // drawrect(data_db, pitch_db, 0, 0, 100, 100, RGB(0, 0, 0));
+
+    printf("channels: %d\n", image_chan);
+
+    drawrectimg(data_db, pitch_db, 0, 0, image_x, image_y, data_image);
 
     drmModeSetCrtc(fdcard, crtc->crtc_id, fb_id, 0, 0, &connector->connector_id, 1, resolution);
 
     sleep(5);
 
-    /* reset */
+    /* restore */
     drmModeSetCrtc(fdcard, crtc->crtc_id,
                    crtc->buffer_id,
                    crtc->x, crtc->y,
@@ -174,6 +249,10 @@ go_exit:
     if (connector != NULL)
     {
         drmModeFreeConnector(connector);
+    }
+    if (data_image != NULL)
+    {
+        stbi_image_free(data_image);
     }
     if (fdcard)
     {
