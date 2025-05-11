@@ -5,13 +5,101 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <string.h>
-// #include <sys/ioctl.h>
+#include <dirent.h>
+#include <linux/input.h>
+#include <sys/ioctl.h>
 #include <sys/param.h>
 #include <sys/mman.h>
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "stb_image_resize2.h"
+
+int is_keyboard_device(const char *devpath)
+{
+    int fd = open(devpath, O_RDONLY);
+    if (fd < 0)
+        return 0;
+
+    unsigned long evbit = 0;
+    ioctl(fd, EVIOCGBIT(0, sizeof(evbit)), &evbit);
+    if (!(evbit & (1 << EV_KEY)))
+    {
+        close(fd);
+        return 0;
+    }
+
+    char name[256] = "my_keyboard";
+    ioctl(fd, EVIOCGNAME(sizeof(name)), name);
+    if (strcasestr(name, "keyboard") || strcasestr(name, "kbd"))
+    {
+        close(fd);
+        return 1;
+    }
+
+    close(fd);
+    return 0;
+}
+
+// Allocates a new string with the full path and returns it via out_path
+int find_keyboard_device(char **out_path)
+{
+    DIR *dir = opendir("/dev/input");
+    if (!dir)
+        return -1;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL)
+    {
+        if (strncmp(entry->d_name, "event", 5) == 0)
+        {
+            size_t path_len = strlen("/dev/input") + 1 + strlen(entry->d_name) + 1;
+            char *devpath = malloc(path_len);
+            if (!devpath)
+            {
+                closedir(dir);
+                return -1;
+            }
+
+            snprintf(devpath, path_len, "%s/%s", "/dev/input", entry->d_name);
+
+            if (is_keyboard_device(devpath))
+            {
+                *out_path = devpath;
+                closedir(dir);
+                return 0;
+            }
+
+            free(devpath); // not a match, free and continue
+        }
+    }
+
+    closedir(dir);
+    return -1;
+}
+
+int wait_for_key_q(int fdkey)
+{
+    struct input_event ev;
+
+    while (1)
+    {
+        ssize_t n = read(fdkey, &ev, sizeof(ev));
+        if (n == sizeof(ev))
+        {
+            if (ev.type == EV_KEY && ev.value == 1) // key press
+            {
+                if (ev.code == KEY_Q)
+                {
+                    break;
+                }
+            }
+        }
+        usleep(10000); // small delay to avoid busy loop
+    }
+
+    return 0;
+}
 
 u_int32_t hexrgb(const u_int32_t rgb)
 {
@@ -29,12 +117,6 @@ float ratio(float a, float b)
     return (MAX(a, b) / MIN(a, b));
 }
 
-/*
-u_int32_t argb(const u_int32_t a, const u_int32_t r, const u_int32_t g, const u_int32_t b)
-{
-    return ((a << 24) | (r << 16) | (g << 8) | b);
-}
-*/
 void drawrect(u_int32_t *data, int stripe, int x1, int y1, int x2, int y2, u_int32_t color)
 {
     for (int y = y1; y < y2; y++)
@@ -110,16 +192,35 @@ int main()
     drmModeEncoderPtr encoder = NULL;
     drmModeCrtcPtr crtc = NULL;
     int fdcard = 0;
+    int fdkeyboard = 0;
     int ret_value = 0;
     unsigned char *data_image = NULL;
     unsigned char *data_image_scale = NULL;
+    char *keyboard_dev_str = NULL;
 
     u_int32_t bg = rgb(255, 255, 255);
+
+    if (find_keyboard_device(&keyboard_dev_str) != 0)
+    {
+        fprintf(stderr, "Could not find a keyboard input device\n");
+        ret_value = MY_ERR_RET;
+        goto go_exit;
+    }
+
+    printf("Using device: %s\n", keyboard_dev_str);
 
     fdcard = open(MY_DRI_CARD, O_RDWR);
     if (fdcard < 0)
     {
         fprintf(stderr, "Could not open dri device card: %s\n", MY_DRI_CARD);
+        ret_value = MY_ERR_RET;
+        goto go_exit;
+    }
+
+    fdkeyboard = open(keyboard_dev_str, O_RDWR);
+    if (fdkeyboard < 0)
+    {
+        fprintf(stderr, "Could not open keyboard device: %s\n", keyboard_dev_str);
         ret_value = MY_ERR_RET;
         goto go_exit;
     }
@@ -197,8 +298,8 @@ int main()
                             data_image_scale, image_x_scale, image_y_scale, 0,
                             4);
 
-    int border_offset_x = (resolution->hdisplay - image_x_scale) / 2;
-    int border_offset_y = (resolution->vdisplay - image_y_scale) / 2;
+    int center_offset_x = (resolution->hdisplay - image_x_scale) / 2;
+    int center_offset_y = (resolution->vdisplay - image_y_scale) / 2;
 
     uint32_t fb_id;
     if (drmModeAddFB(fdcard, resolution->hdisplay, resolution->vdisplay, 24, 32, pitch_db, handle_db, &fb_id))
@@ -243,11 +344,11 @@ int main()
 
     // drawrect(data_db, pitch_db, 0, 0, 100, 100, RGB(0, 0, 0));
 
-    drawrectimg(data_db, pitch_db, border_offset_x, border_offset_y, image_x_scale + border_offset_x, image_y_scale + border_offset_y, data_image_scale, image_x_scale);
+    drawrectimg(data_db, pitch_db, center_offset_x, center_offset_y, image_x_scale + center_offset_x, image_y_scale + center_offset_y, data_image_scale, image_x_scale);
 
     drmModeSetCrtc(fdcard, crtc->crtc_id, fb_id, 0, 0, &connector->connector_id, 1, resolution);
 
-    sleep(5);
+    wait_for_key_q(fdkeyboard);
 
     /* restore */
     drmModeSetCrtc(fdcard, crtc->crtc_id,
@@ -284,6 +385,14 @@ go_exit:
     if (data_image_scale != NULL)
     {
         free(data_image_scale);
+    }
+    if (keyboard_dev_str != NULL)
+    {
+        free(keyboard_dev_str);
+    }
+    if (fdkeyboard)
+    {
+        close(fdkeyboard);
     }
     if (fdcard)
     {
