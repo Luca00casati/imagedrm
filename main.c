@@ -6,9 +6,12 @@
 #include <xf86drmMode.h>
 #include <string.h>
 // #include <sys/ioctl.h>
+#include <sys/param.h>
 #include <sys/mman.h>
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#include "stb_image_resize2.h"
 
 u_int32_t hexrgb(const u_int32_t rgb)
 {
@@ -19,6 +22,11 @@ u_int32_t rgb(const u_int32_t r, const u_int32_t g, const u_int32_t b)
 {
     u_int32_t a = 255;
     return ((a << 24) | (r << 16) | (g << 8) | b);
+}
+
+float ratio(float a, float b)
+{
+    return (MAX(a, b) / MIN(a, b));
 }
 
 /*
@@ -56,7 +64,7 @@ void drawrectimg(u_int32_t *data, int stripe, int x1, int y1, int x2, int y2,
             unsigned char g = data_image[img_index + 1];
             unsigned char b = data_image[img_index + 2];
 
-            data[fb_index] = rgb(r,g,b);
+            data[fb_index] = rgb(r, g, b);
         }
     }
 }
@@ -107,11 +115,14 @@ int main()
     int fdcard = 0;
     int ret_value = 0;
     unsigned char *data_image = NULL;
+    unsigned char *data_image_scale = NULL;
+
+    u_int32_t bg = rgb(255, 255, 255);
 
     fdcard = open(MY_DRI_CARD, O_RDWR);
     if (fdcard < 0)
     {
-        fprintf(stderr, "Could not open dri device %s\n", MY_DRI_CARD);
+        fprintf(stderr, "Could not open dri device card: %s\n", MY_DRI_CARD);
         ret_value = MY_ERR_RET;
         goto go_exit;
     }
@@ -165,7 +176,7 @@ int main()
 
     int image_x, image_y, image_chan;
     /* force 4 channel */
-    data_image = stbi_load("img.jpg", &image_x, &image_y, &image_chan, 4);
+    data_image = stbi_load("resources/landscape-ai-art_1952x1120.jpg", &image_x, &image_y, &image_chan, 4);
     image_chan = 4;
     if (data_image == NULL)
     {
@@ -173,6 +184,25 @@ int main()
         ret_value = MY_ERR_RET;
         goto go_exit;
     }
+    float image_ratio = ratio((float)image_x, (float)image_y);
+    printf("image_x: %d image_y: %d ratio: %f\n", image_x, image_y, image_ratio);
+
+    int scale_factor = 2;
+    int image_x_scale = image_x / scale_factor;
+    int image_y_scale = image_y / scale_factor;
+    data_image_scale = malloc(image_x_scale * image_y_scale * 4);
+    if (data_image_scale == NULL)
+    {
+        fprintf(stderr, "fail to scale image\n");
+        ret_value = MY_ERR_RET;
+        goto go_exit;
+    }
+    float image_scale_ratio = ratio((float)image_x_scale, (float)image_y_scale);
+    printf("image_x_scale: %d image_y_scale: %d ratio_scale: %f\n", image_x_scale, image_y_scale, image_scale_ratio);
+
+    stbir_resize_uint8_srgb(data_image, image_x, image_y, 0,
+                            data_image_scale, image_x_scale, image_y_scale, 0,
+                            4);
 
     uint32_t fb_id;
     if (drmModeAddFB(fdcard, resolution->hdisplay, resolution->vdisplay, 24, 32, pitch_db, handle_db, &fb_id))
@@ -198,6 +228,9 @@ int main()
         goto go_exit;
     }
 
+    float my_dispay_ratio = ratio((float)resolution->hdisplay, (float)resolution->vdisplay);
+    printf("hdisplay: %d vdisplay: %d ratio: %f\n", resolution->hdisplay, resolution->vdisplay, my_dispay_ratio);
+
     data_db = mmap(0, size_db, PROT_READ | PROT_WRITE, MAP_SHARED, fdcard, offset_db);
     if (data_db == MAP_FAILED)
     {
@@ -209,14 +242,12 @@ int main()
     /* bg */
     for (uint32_t i = 0; i < size_db / sizeof(*data_db); i++)
     {
-        data_db[i] = rgb(255, 0, 0);
+        data_db[i] = bg;
     }
 
     // drawrect(data_db, pitch_db, 0, 0, 100, 100, RGB(0, 0, 0));
 
-    printf("channels: %d\n", image_chan);
-
-    drawrectimg(data_db, pitch_db, 0, 0, image_x, image_y, data_image);
+    drawrectimg(data_db, pitch_db, 0, 0, image_x_scale, image_y_scale, data_image_scale);
 
     drmModeSetCrtc(fdcard, crtc->crtc_id, fb_id, 0, 0, &connector->connector_id, 1, resolution);
 
@@ -253,6 +284,10 @@ go_exit:
     if (data_image != NULL)
     {
         stbi_image_free(data_image);
+    }
+    if (data_image_scale != NULL)
+    {
+        free(data_image_scale);
     }
     if (fdcard)
     {
