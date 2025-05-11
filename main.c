@@ -1,11 +1,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <fcntl.h>
-#include <unistd.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <string.h>
+#include <unistd.h>
 #include <dirent.h>
+#include <linux/kd.h>
 #include <linux/input.h>
 #include <sys/ioctl.h>
 #include <sys/param.h>
@@ -183,6 +184,7 @@ int main()
 {
 /* Open the dri device /dev/dri/cardX */
 #define MY_DRI_CARD "/dev/dri/card1"
+#define MY_TTY "/dev/tty4"
 #define MY_ERR_RET -1
 
     u_int32_t *data_db = NULL;
@@ -193,12 +195,28 @@ int main()
     drmModeCrtcPtr crtc = NULL;
     int fdcard = 0;
     int fdkeyboard = 0;
+    int fdtty = 0;
     int ret_value = 0;
     unsigned char *data_image = NULL;
     unsigned char *data_image_scale = NULL;
     char *keyboard_dev_str = NULL;
 
     u_int32_t bg = rgb(255, 255, 255);
+
+    fdtty = open(MY_TTY, O_RDWR);
+    if (fdtty < 0)
+    {
+        fprintf(stderr, "Could not open tty: %s\n", MY_TTY);
+        ret_value = MY_ERR_RET;
+        goto go_exit;
+    }
+
+    if (ioctl(fdtty, KDSKBMODE, K_OFF) < 0)
+    {
+        fprintf(stderr,"error KDSKBMODE K_OFF\n");
+        ret_value = MY_ERR_RET;
+        goto go_exit;
+    }
 
     if (find_keyboard_device(&keyboard_dev_str) != 0)
     {
@@ -350,7 +368,15 @@ int main()
 
     wait_for_key_q(fdkeyboard);
 
-    /* restore */
+    /* restore tty keyboard */
+    if (ioctl(fdtty, KDSKBMODE, K_XLATE) < 0) {
+       fprintf(stderr,"KDSKBMODE restore failed\n");
+       ret_value = MY_ERR_RET;
+        goto go_exit;
+    }
+
+
+    /* restore tty grafics */
     drmModeSetCrtc(fdcard, crtc->crtc_id,
                    crtc->buffer_id,
                    crtc->x, crtc->y,
@@ -397,6 +423,10 @@ go_exit:
     if (fdcard)
     {
         close(fdcard);
+    }
+    if (fdtty)
+    {
+        close(fdtty);
     }
     return ret_value;
 }
