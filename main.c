@@ -22,7 +22,6 @@
 void drawrecttext(u_int32_t *framebuffer, int stride,
                   int xpos, int ypos, const char *text, u_int32_t color, stbtt_fontinfo font, float font_size)
 {
-
     float scale = stbtt_ScaleForPixelHeight(&font, font_size); // font size in pixels
     int ascent, descent, lineGap;
     stbtt_GetFontVMetrics(&font, &ascent, &descent, &lineGap);
@@ -43,6 +42,7 @@ void drawrecttext(u_int32_t *framebuffer, int stride,
 
         stbtt_MakeCodepointBitmap(&font, bitmap, w, h, w, scale, scale, *p);
 
+        // Anti-aliasing: blending based on alpha (greyscale value)
         for (int yb = 0; yb < h; yb++)
         {
             for (int xb = 0; xb < w; xb++)
@@ -50,10 +50,32 @@ void drawrecttext(u_int32_t *framebuffer, int stride,
                 int alpha = bitmap[yb * w + xb];
                 if (alpha > 0)
                 {
+                    // Calculate the position in the framebuffer
                     int px = x + x0 + xb;
                     int py = ypos + baseline + y0 + yb;
                     int pixel_index = py * (stride / 4) + px;
-                    framebuffer[pixel_index] = color;
+
+                    // Get the current pixel color in the framebuffer
+                    u_int32_t current_pixel = framebuffer[pixel_index];
+
+                    // Blend the new color with the existing pixel using the alpha value
+                    u_int32_t r = (current_pixel >> 16) & 0xFF;
+                    u_int32_t g = (current_pixel >> 8) & 0xFF;
+                    u_int32_t b = current_pixel & 0xFF;
+
+                    // Extract the RGB components of the input color
+                    u_int32_t new_r = (color >> 16) & 0xFF;
+                    u_int32_t new_g = (color >> 8) & 0xFF;
+                    u_int32_t new_b = color & 0xFF;
+
+                    // Alpha blending formula: result = alpha * new_color + (1 - alpha) * current_color
+                    float alpha_blend = alpha / 255.0f; // Normalize the alpha value to [0, 1]
+                    r = (u_int32_t)((1.0f - alpha_blend) * r + alpha_blend * new_r);
+                    g = (u_int32_t)((1.0f - alpha_blend) * g + alpha_blend * new_g);
+                    b = (u_int32_t)((1.0f - alpha_blend) * b + alpha_blend * new_b);
+
+                    // Rebuild the pixel and update the framebuffer
+                    framebuffer[pixel_index] = rgb(r, g, b);
                 }
             }
         }
