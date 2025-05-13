@@ -6,6 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <signal.h>
 #include <linux/kd.h>
 #include <linux/input.h>
 #include <sys/ioctl.h>
@@ -15,6 +16,52 @@
 #include "stb_image.h"
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "stb_image_resize2.h"
+#define STB_TRUETYPE_IMPLEMENTATION
+#include "stb_truetype.h"
+
+void drawrecttext(u_int32_t *framebuffer, int stride,
+                  int xpos, int ypos, const char *text, u_int32_t color, stbtt_fontinfo font, float font_size)
+{
+
+    float scale = stbtt_ScaleForPixelHeight(&font, font_size); // font size in pixels
+    int ascent, descent, lineGap;
+    stbtt_GetFontVMetrics(&font, &ascent, &descent, &lineGap);
+    int baseline = (int)(ascent * scale);
+
+    int x = xpos;
+    for (const char *p = text; *p; p++)
+    {
+        int advance, lsb;
+        stbtt_GetCodepointHMetrics(&font, *p, &advance, &lsb);
+
+        int x0, y0, x1, y1;
+        stbtt_GetCodepointBitmapBox(&font, *p, scale, scale, &x0, &y0, &x1, &y1);
+
+        int w = x1 - x0;
+        int h = y1 - y0;
+        unsigned char *bitmap = malloc(w * h);
+
+        stbtt_MakeCodepointBitmap(&font, bitmap, w, h, w, scale, scale, *p);
+
+        for (int yb = 0; yb < h; yb++)
+        {
+            for (int xb = 0; xb < w; xb++)
+            {
+                int alpha = bitmap[yb * w + xb];
+                if (alpha > 0)
+                {
+                    int px = x + x0 + xb;
+                    int py = ypos + baseline + y0 + yb;
+                    int pixel_index = py * (stride / 4) + px;
+                    framebuffer[pixel_index] = color;
+                }
+            }
+        }
+
+        x += (int)(advance * scale);
+        free(bitmap);
+    }
+}
 
 int is_keyboard_device(const char *devpath)
 {
@@ -180,12 +227,26 @@ drmModeModeInfoPtr getPreferredMode(drmModeConnectorPtr connector)
     return NULL;
 }
 
+int fdtty = 0;
+
+void sig_handler(int sig)
+{
+    if (fdtty)
+    {
+        (void)sig; // Suppress unused parameter warning
+        ioctl(fdtty, KDSKBMODE, K_XLATE);
+    }
+}
+
 int main()
 {
-/* Open the dri device /dev/dri/cardX */
+    /* Open the dri device /dev/dri/cardX */
 #define MY_DRI_CARD "/dev/dri/card1"
 #define MY_TTY "/dev/tty4"
 #define MY_ERR_RET -1
+#define IMAGE "resources/image/landscape-ai-art_1952x1120.jpg"
+#define FONT "resources/font/COMIC.TTF"
+#define TEXT "LANDSCAPE AI"
 
     u_int32_t *data_db = NULL;
     drmModeResPtr res = NULL;
@@ -195,13 +256,47 @@ int main()
     drmModeCrtcPtr crtc = NULL;
     int fdcard = 0;
     int fdkeyboard = 0;
-    int fdtty = 0;
+    FILE *fdfont = 0;
+    unsigned char *ttf_buffer = NULL;
     int ret_value = 0;
+    const float font_size = 48.0f;
     unsigned char *data_image = NULL;
     unsigned char *data_image_scale = NULL;
     char *keyboard_dev_str = NULL;
 
-    u_int32_t bg = rgb(255, 255, 255);
+    signal(SIGINT, sig_handler);
+
+    const u_int32_t bg = rgb(255, 255, 255);
+
+    fdfont = fopen(FONT, "rb");
+    if (!fdfont)
+    {
+        fprintf(stderr, "Failed to load font\n");
+        ret_value = MY_ERR_RET;
+        goto go_exit;
+    }
+
+    fseek(fdfont, 0, SEEK_END);
+    long fdfont_size = ftell(fdfont);
+    fseek(fdfont, 0, SEEK_SET);
+
+    ttf_buffer = malloc(fdfont_size);
+    if (ttf_buffer == NULL)
+    {
+        fprintf(stderr, "Failed to malloc font\n");
+        ret_value = MY_ERR_RET;
+        goto go_exit;
+    }
+
+    fread(ttf_buffer, 1, fdfont_size, fdfont);
+
+    stbtt_fontinfo fontinfo;
+    if (!stbtt_InitFont(&fontinfo, ttf_buffer, stbtt_GetFontOffsetForIndex(ttf_buffer, 0)))
+    {
+        fprintf(stderr, "Failed to initialize font\n");
+        ret_value = MY_ERR_RET;
+        goto go_exit;
+    }
 
     fdtty = open(MY_TTY, O_RDWR);
     if (fdtty < 0)
@@ -211,12 +306,22 @@ int main()
         goto go_exit;
     }
 
+    /* disable tty keyboard */
     if (ioctl(fdtty, KDSKBMODE, K_OFF) < 0)
     {
-        fprintf(stderr,"error KDSKBMODE K_OFF\n");
+        fprintf(stderr, "error KDSKBMODE K_OFF\n");
         ret_value = MY_ERR_RET;
         goto go_exit;
     }
+
+    /* set tty grafics only
+    if (ioctl(fdtty, KDSETMODE, KD_GRAPHICS) < 0)
+    {
+        fprintf(stderr, "error KDSKBMODE KD_GRAPHICS\n");
+        ret_value = MY_ERR_RET;
+        goto go_exit;
+    }
+    */
 
     if (find_keyboard_device(&keyboard_dev_str) != 0)
     {
@@ -288,7 +393,7 @@ int main()
 
     int image_x, image_y, image_chan;
     /* force 4 channel */
-    data_image = stbi_load("resources/landscape-ai-art_1952x1120.jpg", &image_x, &image_y, &image_chan, 4);
+    data_image = stbi_load(IMAGE, &image_x, &image_y, &image_chan, 4);
     image_chan = 4;
     if (data_image == NULL)
     {
@@ -316,8 +421,8 @@ int main()
                             data_image_scale, image_x_scale, image_y_scale, 0,
                             4);
 
-    int center_offset_x = (resolution->hdisplay - image_x_scale) / 2;
-    int center_offset_y = (resolution->vdisplay - image_y_scale) / 2;
+    int image_center_offset_x = (resolution->hdisplay - image_x_scale) / 2;
+    int image_center_offset_y = (resolution->vdisplay - image_y_scale) / 2;
 
     uint32_t fb_id;
     if (drmModeAddFB(fdcard, resolution->hdisplay, resolution->vdisplay, 24, 32, pitch_db, handle_db, &fb_id))
@@ -362,19 +467,30 @@ int main()
 
     // drawrect(data_db, pitch_db, 0, 0, 100, 100, RGB(0, 0, 0));
 
-    drawrectimg(data_db, pitch_db, center_offset_x, center_offset_y, image_x_scale + center_offset_x, image_y_scale + center_offset_y, data_image_scale, image_x_scale);
+    drawrectimg(data_db, pitch_db, image_center_offset_x, image_center_offset_y, image_x_scale + image_center_offset_x, image_y_scale + image_center_offset_y, data_image_scale, image_x_scale);
+
+    drawrecttext(data_db, pitch_db, 400, 30, TEXT, rgb(0, 0, 0), fontinfo, font_size);
 
     drmModeSetCrtc(fdcard, crtc->crtc_id, fb_id, 0, 0, &connector->connector_id, 1, resolution);
 
     wait_for_key_q(fdkeyboard);
 
     /* restore tty keyboard */
-    if (ioctl(fdtty, KDSKBMODE, K_XLATE) < 0) {
-       fprintf(stderr,"KDSKBMODE restore failed\n");
-       ret_value = MY_ERR_RET;
+    if (ioctl(fdtty, KDSKBMODE, K_XLATE) < 0)
+    {
+        fprintf(stderr, "KDSKBMODE restore keyboard failed\n");
+        ret_value = MY_ERR_RET;
         goto go_exit;
     }
 
+    /* set tty text
+    if (ioctl(fdtty, KDSKBMODE, KD_TEXT) < 0)
+    {
+        fprintf(stderr, "KDSKBMODE restore text failed\n");
+        ret_value = MY_ERR_RET;
+        goto go_exit;
+    }
+    */
 
     /* restore tty grafics */
     drmModeSetCrtc(fdcard, crtc->crtc_id,
@@ -427,6 +543,14 @@ go_exit:
     if (fdtty)
     {
         close(fdtty);
+    }
+    if (fdfont)
+    {
+        fclose(fdfont);
+    }
+    if (ttf_buffer != NULL)
+    {
+        free(ttf_buffer);
     }
     return ret_value;
 }
